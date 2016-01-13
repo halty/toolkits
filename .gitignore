@@ -1,0 +1,17 @@
+.settings
+.project
+target
+**/.settings
+**/.classpath
+**/.eclipse
+**/.project
+**/target
+**/**/target
+**/bin
+**/**/target
+**/**/.classpath
+.idea
+
+**/.idea
+*.iml
+**/**/target
