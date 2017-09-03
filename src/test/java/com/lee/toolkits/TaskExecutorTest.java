@@ -14,6 +14,8 @@ import java.util.concurrent.TimeUnit;
 
 public class TaskExecutorTest {
 
+    private static final int MAX_SLEEP_MILLS = 100;
+
     private static TaskExecutor executor;
     private static int[] elements;
 
@@ -46,6 +48,21 @@ public class TaskExecutorTest {
         TimeUnit.SECONDS.sleep(5);  // wait for cat sync
     }
 
+    @Test
+    public void testSingleResultWithoutFastFirst() throws Exception {
+        Long expect = sum(elements, 0, elements.length);
+        List<TaskExecutor.Computable<Long>> tasks = new ArrayList<TaskExecutor.Computable<Long>>(5);
+        tasks.add(newExceptionTask("SingleSumTask-1", MAX_SLEEP_MILLS / 5));
+        tasks.add(newExceptionTask("SingleSumTask-2", MAX_SLEEP_MILLS / 5 * 2));
+        tasks.add(newExceptionTask("SingleSumTask-3", MAX_SLEEP_MILLS / 5 * 3));
+        tasks.add(newExceptionTask("SingleSumTask-4", MAX_SLEEP_MILLS / 5 * 4));
+        tasks.add(newTaskWithSleepMills("SingleSumTask-5", 0, elements.length, MAX_SLEEP_MILLS));
+        TaskExecutor.SingleResult<Long> result = executor.invokeAny(tasks);
+        Long sum = result.get(5L, TimeUnit.SECONDS);
+        Assert.assertEquals(expect, sum);
+        TimeUnit.SECONDS.sleep(5);  // wait for cat sync
+    }
+
     // @Test
     public void testMultiResult() throws Exception {
         int range = elements.length / 5;
@@ -65,7 +82,7 @@ public class TaskExecutorTest {
         TimeUnit.SECONDS.sleep(5);
     }
 
-    @Test
+    // @Test
     public void testTripleResult() throws Exception {
         Long expect1 = sum(elements, 0, 20);
         BigInteger expect2 = BigInteger.valueOf(sum(elements, 21, 50));
@@ -117,12 +134,33 @@ public class TaskExecutorTest {
         TimeUnit.SECONDS.sleep(5);
     }
 
+    private static TaskExecutor.Computable<Long> newExceptionTask(final String taskName, final int sleepMills) {
+        return new TaskExecutor.Computable<Long>(taskName) {
+            @Override
+            public Long compute() throws Exception {
+                TimeUnit.MILLISECONDS.sleep(sleepMills);
+                throw new ArithmeticException();
+            }
+        };
+    }
+
     private static TaskExecutor.Computable<Long> newTask(final String taskName, final int start, final int end) {
         return new TaskExecutor.Computable<Long>(taskName) {
             @Override
             public Long compute() throws Exception {
-                int sleepTime = new Random().nextInt(100);
+                int sleepTime = new Random().nextInt(MAX_SLEEP_MILLS);
                 long s = sum(elements, start, end, sleepTime);
+                return s;
+            }
+        };
+    }
+
+    private static TaskExecutor.Computable<Long> newTaskWithSleepMills(final String taskName, final int start, final int end,
+        final int sleepMills) {
+        return new TaskExecutor.Computable<Long>(taskName) {
+            @Override
+            public Long compute() throws Exception {
+                long s = sum(elements, start, end, sleepMills);
                 return s;
             }
         };
@@ -133,7 +171,7 @@ public class TaskExecutorTest {
         return new TaskExecutor.Computable<T>(taskName) {
             @Override
             public T compute() throws Exception {
-                int sleepTime = new Random().nextInt(100);
+                int sleepTime = new Random().nextInt(MAX_SLEEP_MILLS);
                 long s = sum(elements, start, end, sleepTime);
                 if(clazz == Long.class) {
                     return (T) Long.valueOf(s);

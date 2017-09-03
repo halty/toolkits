@@ -81,13 +81,27 @@ public class TaskExecutor {
             });
     }
 
-    /** submits the given tasks, returning the result of one that has completed successfully **/
+    /**
+     * submits the given tasks, returning the result of one that has completed successfully.
+     * It works as if by invoking {@link #invokeAny(List, boolean)} with given tasks and
+     * <code>fastFirst</code> argument of <code>false</code>.
+     */
     public <V> SingleResult<V> invokeAny(List<Computable<V>> tasks) {
+        return invokeAny(tasks, false);
+    }
+
+    /**
+     * submits the given tasks, returning the result of one that has completed.
+     * if <code>fastFirst</code> is true, returning the first completed result whether it is successful
+     * or not, otherwise returning the result of one that has completed successfully.
+     * returning exceptional result if all tasks failed.
+     */
+    public <V> SingleResult<V> invokeAny(List<Computable<V>> tasks, boolean fastFirst) {
         if(tasks == null || tasks.size() == 0) {
             throw new IllegalArgumentException("tasks is empty");
         }
         List<Task> taskWrappers = new ArrayList<Task>(tasks.size());
-        SingleResult<V> result = new SingleResult<V>(taskType, taskWrappers);
+        SingleResult<V> result = new SingleResult<V>(taskType, taskWrappers, fastFirst);
         int i = 0;
         for(Computable<V> t : tasks) {
             Task wrapper = new Task(t, i++, result);
@@ -326,10 +340,6 @@ public class TaskExecutor {
                 ex = e;
                 ran = false;
             }finally {
-                /*
-                 * runner may lose to reset null, if throwing exception at statement 'Cat.newTransaction'.
-                 * but task has no chance to reuse, it doesn't matter.
-                 */
                 runner = null;
                 t.complete();
                 setResult(ran, result, ex, t.getDurationInMillis());    // must after runner reset, because may be cancel tasks
@@ -337,13 +347,10 @@ public class TaskExecutor {
         }
 
         private void setResult(boolean ran, Object result, Exception ex, long timeInMills) {
-            int s = this.result.getStatus();
-            if(s == Result.INIT) {
-                if(ran) {
-                    this.result.setResult(index, result, timeInMills);
-                }else {
-                    this.result.setException(index, ex, timeInMills);
-                }
+            if(ran) {
+                this.result.setResult(index, result, timeInMills);
+            }else {
+                this.result.setException(index, ex, timeInMills);
             }
         }
     }
@@ -473,18 +480,16 @@ public class TaskExecutor {
             long timeInMills = System.currentTimeMillis() - startTime;
             Transaction t = TRANSACTION_FACTORY.newTransactionWithDuration(taskType, resultName(), timeInMills);
             t.addData("identity", identity);
-            if(t != null) {
-                try {
-                    recordStatistics(t);
-                    t.addData("resultStatus", resultStatus);
-                    if(resultStatus == SUCCESS) {
-                        t.setStatus(Transaction.SUCCESS);
-                    }else {
-                        t.setStatus(String.valueOf(resultStatus));
-                    }
-                }finally {
-                    t.complete();
+            try {
+                recordStatistics(t);
+                t.addData("resultStatus", resultStatus);
+                if(resultStatus == SUCCESS) {
+                    t.setStatus(Transaction.SUCCESS);
+                }else {
+                    t.setStatus(String.valueOf(resultStatus));
                 }
+            }finally {
+                t.complete();
             }
         }
 
@@ -501,10 +506,14 @@ public class TaskExecutor {
     }
 
     public static class SingleResult<V> extends Result {
+        private final boolean fastFirst;
+        private final AtomicInteger exceptionCount;
         private Object result;
 
-        SingleResult(String type, List<Task> tasks) {
+        SingleResult(String type, List<Task> tasks, boolean fastFirst) {
             super(type, tasks);
+            this.fastFirst = fastFirst;
+            this.exceptionCount = new AtomicInteger(0);
         }
 
         /**
@@ -569,13 +578,34 @@ public class TaskExecutor {
 
         @Override
         void setException(int order, Exception ex, long duration) {
-            if(casStatus(INIT, ONGOING)) {
-                this.result = ex;
-                // exception task ignore duration
-                lazySetStatus(EXCEPTIONAL);
-                notifyWaiters();
-                cancelTasks();  // cancel other unfinished tasks
-                completeComputation(EXCEPTIONAL);
+            if(fastFirst) {
+                if(casStatus(INIT, ONGOING)) {
+                    this.result = ex;
+                    // exception task ignore duration
+                    lazySetStatus(EXCEPTIONAL);
+                    notifyWaiters();
+                    cancelTasks();  // cancel other unfinished tasks
+                    completeComputation(EXCEPTIONAL);
+                }
+            }else {
+                int count = exceptionCount.incrementAndGet();
+                // the last task also exceptional
+                if(count == bindTasks.size() && casStatus(INIT, ONGOING)) {
+                    this.result = ex;
+                    // exception task ignore duration
+                    lazySetStatus(EXCEPTIONAL);
+                    notifyWaiters();
+                    completeComputation(EXCEPTIONAL);
+                }
+            }
+        }
+
+        @Override
+        void recordStatistics(Transaction t) {
+            super.recordStatistics(t);
+            t.addData("fastFirst", fastFirst);
+            if(!fastFirst) {
+                t.addData("exceptionCount", exceptionCount.get());
             }
         }
 
@@ -846,7 +876,7 @@ public class TaskExecutor {
     	long getDurationInMillis();
     }
     
-    static interface TransactionFactory {
+    interface TransactionFactory {
     	
     	/** create a new transaction with given type and name **/
     	Transaction newTransaction(String type, String name);
